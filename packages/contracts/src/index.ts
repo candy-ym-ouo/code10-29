@@ -44,6 +44,68 @@ const requiredText = (label: string, max: number) =>
 const optionalText = (max: number, label: string) =>
   z.string().trim().max(max, `${label}不能超过 ${max} 个字符`).optional().nullable();
 
+/**
+ * 解析来自表单 / JSON 的数值输入。
+ * 与 Number() 的关键区别：空串、纯空白、null/undefined 一律视为“缺失”（返回 null），
+ * 绝不当作 0；非有限数字（NaN、Infinity）同样返回 null。
+ * 合法的 0 会原样返回，历史零值不会被误伤。
+ */
+export function parseFiniteNumber(input: unknown): number | null {
+  if (typeof input === "number") return Number.isFinite(input) ? input : null;
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (trimmed === "") return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+type NumberConstraints = {
+  int?: boolean;
+  min?: number;
+  max?: number;
+  positive?: boolean;
+};
+
+/**
+ * 请求体专用的严格数值校验：缺失（undefined）、null、空字符串、空白串和非数字字符串
+ * 都会被拒绝并给出“请填写数值”类错误，而不是像 z.coerce.number() 那样静默归零。
+ * 查询参数仍应使用 z.coerce.number()，因此这里只用于 JSON body。
+ */
+function requiredNumberInput(label: string, constraints: NumberConstraints = {}): z.ZodType<number> {
+  return z
+    .custom<number>(
+      (raw) =>
+        raw !== undefined &&
+        raw !== null &&
+        typeof raw !== "boolean" &&
+        parseFiniteNumber(raw) !== null,
+      { message: `请填写${label}` },
+    )
+    .superRefine((raw, ctx) => {
+      const value = parseFiniteNumber(raw);
+      if (value === null) return;
+      if (constraints.int && !Number.isInteger(value)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}必须是整数` });
+      if (constraints.positive && value <= 0) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}必须大于 0` });
+      if (constraints.min !== undefined && value < constraints.min)
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}不能小于 ${constraints.min}` });
+      if (constraints.max !== undefined && value > constraints.max)
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}不能大于 ${constraints.max}` });
+    })
+    .transform((raw) => parseFiniteNumber(raw) as number);
+}
+
+/** 可选的严格数值字段：仅允许字段缺省（undefined）或显式合法数字；空串/null 均不接受。 */
+function optionalNumberInput(label: string, constraints: NumberConstraints = {}): z.ZodType<number | undefined> {
+  return requiredNumberInput(label, constraints).optional();
+}
+
+/** 可清空的严格数值字段：显式 null 表示清空，空串仍按“缺失”拒绝，不会被写成 0。 */
+function nullableNumberInput(label: string, constraints: NumberConstraints = {}): z.ZodType<number | null | undefined> {
+  return requiredNumberInput(label, constraints).optional().nullable();
+}
+
 export const emailSchema = z.string().trim().toLowerCase().email("邮箱格式不正确").max(254);
 export const passwordSchema = z
   .string()
@@ -79,11 +141,11 @@ export const sessionCreateSchema = z.object({
   focus: optionalText(500, "本次重点"),
   location: optionalText(120, "练习地点"),
   notes: optionalText(5000, "总体备注"),
-  actualDurationMs: z.coerce.number().int().positive().max(86_400_000).optional().nullable(),
+  actualDurationMs: nullableNumberInput("实际时长（毫秒）", { int: true, positive: true, max: 86_400_000 }),
 });
 export const sessionUpdateSchema = sessionCreateSchema
   .partial()
-  .extend({ version: z.coerce.number().int().nonnegative() });
+  .extend({ version: requiredNumberInput("版本", { int: true, min: 0 }) });
 export const sessionBatchSchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(100),
 });
@@ -104,9 +166,9 @@ export const sessionListQuerySchema = z.object({
 const annotationCreateBaseSchema = z.object({
   mediaId: z.string().uuid(),
   type: z.enum(ANNOTATION_TYPES),
-  severity: z.coerce.number().int().min(1).max(5),
-  startMs: z.coerce.number().int().nonnegative(),
-  endMs: z.coerce.number().int().positive(),
+  severity: requiredNumberInput("严重程度", { int: true, min: 1, max: 5 }),
+  startMs: requiredNumberInput("开始时间（毫秒）", { int: true, min: 0 }),
+  endMs: requiredNumberInput("结束时间（毫秒）", { int: true, positive: true }),
   title: requiredText("短标题", 80),
   description: optionalText(2000, "详细描述"),
   nextAction: optionalText(1000, "建议动作"),
@@ -135,7 +197,7 @@ export const reviewDraftSchema = z.object({
   suggestedNextPracticeAt: z.coerce.date().optional().nullable(),
 });
 export const reviewSaveSchema = reviewDraftSchema.extend({
-  version: z.coerce.number().int().nonnegative(),
+  version: requiredNumberInput("版本", { int: true, min: 0 }),
 });
 
 export const goalCreateSchema = z.object({
@@ -144,8 +206,8 @@ export const goalCreateSchema = z.object({
   title: requiredText("目标标题", 160),
   category: z.enum(GOAL_CATEGORIES),
   metricType: z.enum(METRIC_TYPES),
-  baselineValue: z.coerce.number().finite().optional().nullable(),
-  targetValue: z.coerce.number().finite(),
+  baselineValue: nullableNumberInput("基线值"),
+  targetValue: requiredNumberInput("目标值"),
   unit: requiredText("单位", 24),
   dueDate: z.coerce.date(),
   method: optionalText(3000, "练习方法"),
@@ -154,7 +216,7 @@ export const goalCreateSchema = z.object({
 export const goalUpdateSchema = goalCreateSchema
   .omit({ sourceSessionId: true })
   .partial()
-  .extend({ version: z.coerce.number().int().nonnegative() });
+  .extend({ version: requiredNumberInput("版本", { int: true, min: 0 }) });
 export const goalListQuerySchema = z.object({
   status: z.enum(GOAL_STATUSES).optional(),
   category: z.enum(GOAL_CATEGORIES).optional(),
@@ -165,7 +227,7 @@ export const goalListQuerySchema = z.object({
 });
 export const goalProgressCreateSchema = z.object({
   sessionId: z.string().uuid(),
-  actualValue: z.coerce.number().finite(),
+  actualValue: requiredNumberInput("实际值"),
   note: optionalText(1000, "进度备注"),
   evidenceMediaId: z.string().uuid().optional().nullable(),
   recordedAt: z.coerce.date().optional(),
@@ -173,7 +235,7 @@ export const goalProgressCreateSchema = z.object({
 export const goalCancelSchema = z.object({ reason: requiredText("取消原因", 1000) });
 export const goalActivateSchema = z.object({
   dueDate: z.coerce.date().optional(),
-  targetValue: z.coerce.number().finite().optional(),
+  targetValue: optionalNumberInput("目标值"),
 });
 
 export const completionGoalProgressSchema = goalProgressCreateSchema.omit({ sessionId: true }).extend({
@@ -181,11 +243,11 @@ export const completionGoalProgressSchema = goalProgressCreateSchema.omit({ sess
 });
 
 export const completionSchema = z.object({
-  version: z.coerce.number().int().nonnegative(),
+  version: requiredNumberInput("版本", { int: true, min: 0 }),
   review: reviewDraftSchema.extend({ nextFocus: requiredText("下次练习重点", 500) }),
   goalCreates: z.array(goalCreateSchema.omit({ sourceSessionId: true })).default([]),
   goalProgressUpdates: z.array(completionGoalProgressSchema).default([]),
-  annotationVersion: z.coerce.number().int().nonnegative().optional(),
+  annotationVersion: optionalNumberInput("标记版本", { int: true, min: 0 }),
 });
 
 export const statisticsRangeSchema = z.object({

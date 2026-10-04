@@ -6,6 +6,7 @@ import WaveformPlayer, { type WaveAnnotation } from "../components/WaveformPlaye
 import StatusBadge from "../components/StatusBadge.vue";
 import { apiFetch, ApiError } from "../api/client.js";
 import { annotationLabels, formatBytes, formatTimeMs, parseTimeInput } from "../utils/format.js";
+import { parseFiniteNumber } from "../utils/numbers.js";
 
 type AnnotationType = "RHYTHM" | "FINGERING" | "EMOTION";
 interface Media {
@@ -329,14 +330,35 @@ async function completeReview(): Promise<void> {
   error.value = "";
   missing.value = [];
   clearTimeout(saveTimer);
+  const progressUpdates: Array<{ goalId: string; actualValue: number; note: string | null }> = [];
+  for (const goal of openGoals.value) {
+    const raw = progressValues[goal.id];
+    if (raw === undefined || raw.trim() === "") continue;
+    const actualValue = parseFiniteNumber(raw);
+    if (actualValue === null) {
+      error.value = `请填写“${goal.title}”的本次实际值（可以为 0，但不能留空）`;
+      return;
+    }
+    progressUpdates.push({ goalId: goal.id, actualValue, note: progressNotes[goal.id] || null });
+  }
+  const goalCreates = newGoals.value.map((goal) => ({
+    annotationId: goal.annotationId || null,
+    title: goal.title,
+    category: goal.category,
+    metricType: goal.metricType,
+    baselineValue: parseFiniteNumber(goal.baselineValue),
+    targetValue: parseFiniteNumber(goal.targetValue),
+    unit: goal.unit,
+    dueDate: new Date(`${goal.dueDate}T23:59:59.999Z`).toISOString(),
+    method: goal.method || null,
+    evidenceRequirement: goal.evidenceRequirement,
+  }));
+  const invalidGoal = newGoals.value.find((goal) => parseFiniteNumber(goal.targetValue) === null);
+  if (invalidGoal) {
+    error.value = `目标“${invalidGoal.title || "未命名"}”请填写目标值（可以为 0，但不能留空）`;
+    return;
+  }
   try {
-    const progressUpdates = openGoals.value
-      .filter((goal) => progressValues[goal.id] !== undefined && progressValues[goal.id] !== "")
-      .map((goal) => ({
-        goalId: goal.id,
-        actualValue: Number(progressValues[goal.id]),
-        note: progressNotes[goal.id] || null,
-      }));
     const result = await apiFetch<{ session: Session }>(`/api/v1/sessions/${session.value.id}/review/complete`, {
       method: "POST",
       body: JSON.stringify({
@@ -348,18 +370,7 @@ async function completeReview(): Promise<void> {
           noIssues: reviewForm.noIssues,
           suggestedNextPracticeAt: reviewForm.suggestedNextPracticeAt ? new Date(reviewForm.suggestedNextPracticeAt).toISOString() : null,
         },
-        goalCreates: newGoals.value.map((goal) => ({
-          annotationId: goal.annotationId || null,
-          title: goal.title,
-          category: goal.category,
-          metricType: goal.metricType,
-          baselineValue: goal.baselineValue === "" ? null : Number(goal.baselineValue),
-          targetValue: Number(goal.targetValue),
-          unit: goal.unit,
-          dueDate: new Date(`${goal.dueDate}T23:59:59.999Z`).toISOString(),
-          method: goal.method || null,
-          evidenceRequirement: goal.evidenceRequirement,
-        })),
+        goalCreates,
         goalProgressUpdates: progressUpdates,
       }),
     });

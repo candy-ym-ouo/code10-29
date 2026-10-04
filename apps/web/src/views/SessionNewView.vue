@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import { apiFetch, ApiError } from "../api/client.js";
 import { useAuthStore } from "../stores/auth.js";
 import { toDateTimeLocal } from "../utils/format.js";
+import { parseFiniteNumber } from "../utils/numbers.js";
 
 const router = useRouter();
 const auth = useAuthStore();
@@ -13,7 +14,7 @@ const startedAt = ref(toDateTimeLocal());
 const focus = ref("");
 const location = ref("");
 const notes = ref("");
-const durationMinutes = ref<number | null>(null);
+const durationMinutes = ref<string | number | null>(null);
 const error = ref("");
 const submitting = ref(false);
 
@@ -23,6 +24,7 @@ async function submit(): Promise<void> {
   error.value = "";
   submitting.value = true;
   try {
+    const durationMinutesValue = parseFiniteNumber(durationMinutes.value);
     const result = await apiFetch<{ session: { id: string } }>("/api/v1/sessions", {
       method: "POST",
       body: JSON.stringify({
@@ -32,7 +34,7 @@ async function submit(): Promise<void> {
         focus: focus.value || null,
         location: location.value || null,
         notes: notes.value || null,
-        ...(durationMinutes.value == null ? {} : { actualDurationMs: durationMinutes.value * 60_000 }),
+        ...(durationMinutesValue === null ? {} : { actualDurationMs: durationMinutesValue * 60_000 }),
       }),
     });
     await router.push(`/sessions/${result.session.id}/review`);

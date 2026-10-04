@@ -5,6 +5,7 @@ import EmptyState from "../components/EmptyState.vue";
 import LoadingBlock from "../components/LoadingBlock.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { goalStatusLabels } from "../utils/format.js";
+import { parseFiniteNumber, requireFiniteNumber } from "../utils/numbers.js";
 
 interface Goal {
   id: string; title: string; category: string; metricType: string; baselineValue: number | null; targetValue: number; unit: string; dueDate: string;
@@ -24,6 +25,7 @@ const creating = ref(false);
 const progressSession = reactive<Record<string, string>>({});
 const progressValue = reactive<Record<string, string>>({});
 const progressNote = reactive<Record<string, string>>({});
+const progressError = reactive<Record<string, string>>({});
 const form = reactive({
   sourceSessionId: "", title: "", category: "RHYTHM", metricType: "SPEED", baselineValue: "", targetValue: "", unit: "BPM",
   dueDate: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), method: "", evidenceRequirement: "NONE", annotationId: "",
@@ -48,36 +50,58 @@ async function load(): Promise<void> {
   }
 }
 async function createGoal(): Promise<void> {
+  const targetValue = parseFiniteNumber(form.targetValue);
+  if (targetValue === null) {
+    error.value = "请填写目标值（可以为 0，但不能留空）";
+    return;
+  }
   const annotationId = form.annotationId || null;
-  await apiFetch("/api/v1/goals", {
-    method: "POST",
-    body: JSON.stringify({
-      sourceSessionId: form.sourceSessionId,
-      annotationId,
-      title: form.title,
-      category: form.category,
-      metricType: form.metricType,
-      baselineValue: form.baselineValue === "" ? null : Number(form.baselineValue),
-      targetValue: Number(form.targetValue),
-      unit: form.unit,
-      dueDate: new Date(`${form.dueDate}T12:00:00.000Z`).toISOString(),
-      method: form.method || null,
-      evidenceRequirement: form.evidenceRequirement,
-    }),
-  });
+  try {
+    await apiFetch("/api/v1/goals", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceSessionId: form.sourceSessionId,
+        annotationId,
+        title: form.title,
+        category: form.category,
+        metricType: form.metricType,
+        baselineValue: parseFiniteNumber(form.baselineValue),
+        targetValue,
+        unit: form.unit,
+        dueDate: new Date(`${form.dueDate}T12:00:00.000Z`).toISOString(),
+        method: form.method || null,
+        evidenceRequirement: form.evidenceRequirement,
+      }),
+    });
+  } catch (reason) {
+    error.value = reason instanceof ApiError ? reason.message : "目标创建失败";
+    return;
+  }
   creating.value = false;
   form.title = "";
   form.targetValue = "";
+  form.baselineValue = "";
   await load();
 }
 async function recordProgress(goal: Goal): Promise<void> {
+  let actualValue: number;
+  try {
+    actualValue = requireFiniteNumber(progressValue[goal.id], "本次实际值");
+  } catch (reason) {
+    progressError[goal.id] = reason instanceof Error ? reason.message : "请填写本次实际值";
+    return;
+  }
   const sessionId = progressSession[goal.id] || goal.sourceSession.id;
-  const actualValue = Number(progressValue[goal.id]);
-  if (!Number.isFinite(actualValue)) return;
-  await apiFetch(`/api/v1/goals/${goal.id}/progress`, {
-    method: "POST",
-    body: JSON.stringify({ sessionId, actualValue, note: progressNote[goal.id] || null }),
-  });
+  progressError[goal.id] = "";
+  try {
+    await apiFetch(`/api/v1/goals/${goal.id}/progress`, {
+      method: "POST",
+      body: JSON.stringify({ sessionId, actualValue, note: progressNote[goal.id] || null }),
+    });
+  } catch (reason) {
+    progressError[goal.id] = reason instanceof ApiError ? reason.message : "进度保存失败";
+    return;
+  }
   progressValue[goal.id] = "";
   progressNote[goal.id] = "";
   await load();
@@ -144,6 +168,7 @@ onMounted(load);
           <input v-model="progressValue[goal.id]" type="number" step="any" placeholder="实际值" />
           <input v-model="progressNote[goal.id]" placeholder="备注" />
           <button class="button small secondary" @click="recordProgress(goal)">记录进度</button>
+          <small v-if="progressError[goal.id]" class="danger-text" style="grid-column: 1 / -1">{{ progressError[goal.id] }}</small>
         </div>
         <div class="row end">
           <button v-if="['MISSED', 'CANCELLED'].includes(goal.status)" class="button small secondary" @click="activateGoal(goal)">重新激活</button>
