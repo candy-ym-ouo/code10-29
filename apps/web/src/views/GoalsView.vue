@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
+import { readOptionalMetric, readRequiredMetric } from "@practice/contracts";
 import { apiFetch, ApiError } from "../api/client.js";
 import EmptyState from "../components/EmptyState.vue";
 import LoadingBlock from "../components/LoadingBlock.vue";
@@ -48,6 +49,16 @@ async function load(): Promise<void> {
   }
 }
 async function createGoal(): Promise<void> {
+  let targetValue: number;
+  let baselineValue: number | null;
+  try {
+    // 统一口径：缺失/空字符串必须被拒绝，绝不允许 Number("") 静默变成 0。
+    targetValue = readRequiredMetric("目标值", form.targetValue);
+    baselineValue = readOptionalMetric("基线值", form.baselineValue);
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "数值不合法";
+    return;
+  }
   const annotationId = form.annotationId || null;
   await apiFetch("/api/v1/goals", {
     method: "POST",
@@ -57,8 +68,8 @@ async function createGoal(): Promise<void> {
       title: form.title,
       category: form.category,
       metricType: form.metricType,
-      baselineValue: form.baselineValue === "" ? null : Number(form.baselineValue),
-      targetValue: Number(form.targetValue),
+      baselineValue,
+      targetValue,
       unit: form.unit,
       dueDate: new Date(`${form.dueDate}T12:00:00.000Z`).toISOString(),
       method: form.method || null,
@@ -71,9 +82,14 @@ async function createGoal(): Promise<void> {
   await load();
 }
 async function recordProgress(goal: Goal): Promise<void> {
+  let actualValue: number;
+  try {
+    actualValue = readRequiredMetric("实际进度值", progressValue[goal.id]);
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "请填写本次实际值";
+    return;
+  }
   const sessionId = progressSession[goal.id] || goal.sourceSession.id;
-  const actualValue = Number(progressValue[goal.id]);
-  if (!Number.isFinite(actualValue)) return;
   await apiFetch(`/api/v1/goals/${goal.id}/progress`, {
     method: "POST",
     body: JSON.stringify({ sessionId, actualValue, note: progressNote[goal.id] || null }),

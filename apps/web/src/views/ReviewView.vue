@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { createSHA256 } from "hash-wasm";
+import { readOptionalMetric, readRequiredMetric } from "@practice/contracts";
 import WaveformPlayer, { type WaveAnnotation } from "../components/WaveformPlayer.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { apiFetch, ApiError } from "../api/client.js";
@@ -330,13 +331,30 @@ async function completeReview(): Promise<void> {
   missing.value = [];
   clearTimeout(saveTimer);
   try {
-    const progressUpdates = openGoals.value
-      .filter((goal) => progressValues[goal.id] !== undefined && progressValues[goal.id] !== "")
-      .map((goal) => ({
-        goalId: goal.id,
-        actualValue: Number(progressValues[goal.id]),
-        note: progressNotes[goal.id] || null,
-      }));
+    // 统一口径：空字符串/缺失值一律拒绝，绝不允许 Number("") 静默变成 0 写进目标值或进度。
+    const progressUpdates = openGoals.value.flatMap((goal) => {
+      const raw = progressValues[goal.id];
+      if (raw === undefined || raw.trim() === "") return [];
+      return [
+        {
+          goalId: goal.id,
+          actualValue: readRequiredMetric(`目标“${goal.title}”的本次实际值`, raw),
+          note: progressNotes[goal.id] || null,
+        },
+      ];
+    });
+    const goalCreates = newGoals.value.map((goal) => ({
+      annotationId: goal.annotationId || null,
+      title: goal.title,
+      category: goal.category,
+      metricType: goal.metricType,
+      baselineValue: readOptionalMetric("基线值", goal.baselineValue),
+      targetValue: readRequiredMetric(`目标“${goal.title || "未命名目标"}”的目标值`, goal.targetValue),
+      unit: goal.unit,
+      dueDate: new Date(`${goal.dueDate}T23:59:59.999Z`).toISOString(),
+      method: goal.method || null,
+      evidenceRequirement: goal.evidenceRequirement,
+    }));
     const result = await apiFetch<{ session: Session }>(`/api/v1/sessions/${session.value.id}/review/complete`, {
       method: "POST",
       body: JSON.stringify({
@@ -348,18 +366,7 @@ async function completeReview(): Promise<void> {
           noIssues: reviewForm.noIssues,
           suggestedNextPracticeAt: reviewForm.suggestedNextPracticeAt ? new Date(reviewForm.suggestedNextPracticeAt).toISOString() : null,
         },
-        goalCreates: newGoals.value.map((goal) => ({
-          annotationId: goal.annotationId || null,
-          title: goal.title,
-          category: goal.category,
-          metricType: goal.metricType,
-          baselineValue: goal.baselineValue === "" ? null : Number(goal.baselineValue),
-          targetValue: Number(goal.targetValue),
-          unit: goal.unit,
-          dueDate: new Date(`${goal.dueDate}T23:59:59.999Z`).toISOString(),
-          method: goal.method || null,
-          evidenceRequirement: goal.evidenceRequirement,
-        })),
+        goalCreates,
         goalProgressUpdates: progressUpdates,
       }),
     });
@@ -368,7 +375,7 @@ async function completeReview(): Promise<void> {
     if (reason instanceof ApiError && reason.code === "REVIEW_INCOMPLETE" && Array.isArray(reason.details)) {
       missing.value = reason.details as string[];
     } else {
-      error.value = reason instanceof ApiError ? reason.message : "完成复盘失败";
+      error.value = reason instanceof ApiError ? reason.message : reason instanceof Error ? reason.message : "完成复盘失败";
     }
   }
 }

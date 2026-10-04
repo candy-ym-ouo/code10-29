@@ -44,6 +44,68 @@ const requiredText = (label: string, max: number) =>
 const optionalText = (max: number, label: string) =>
   z.string().trim().max(max, `${label}不能超过 ${max} 个字符`).optional().nullable();
 
+/**
+ * 指标数值入参的统一口径：
+ * - 不使用 z.coerce.number()，因为 Number("")、Number("   ")、Number(null) 都会静默变成 0，
+ *   导致缺失值被当成合法的零写入目标值/进度，污染历史数据。
+ * - 数字与数字字符串会被解析为有限数；空白字符串按“未填写”处理；
+ *   null / undefined / NaN / 布尔等非数值输入一律拒绝。
+ *
+ * 解析指标数值入参。返回 `null` 表示“未填写”（仅可空字段允许），
+ * 非法内容通过 ctx 登记错误，调用方返回 z.NEVER 中断解析。
+ */
+function readMetricRaw(value: unknown, label: string, ctx: z.RefinementCtx): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") return null;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}必须是有限数值` });
+    return z.NEVER;
+  }
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return value;
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}必须是有限数值` });
+    return z.NEVER;
+  }
+  ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}必须是数值` });
+  return z.NEVER;
+}
+
+/** 必填指标数值：缺失（null/undefined/空字符串）直接拒绝，绝不当成 0。 */
+export const requiredMetricValue = (label: string) =>
+  z.any().transform((value, ctx: z.RefinementCtx): number => {
+    if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}不能为空` });
+      return z.NEVER;
+    }
+    const parsed = readMetricRaw(value, label, ctx);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}不能为空` });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
+/** 可空指标数值：键可省略；空字符串/null 归一化为 null（表示未填写），不会落成 0。 */
+export const optionalMetricValue = (label: string) =>
+  z.any().transform((value, ctx: z.RefinementCtx): number | null => readMetricRaw(value, label, ctx)).optional();
+
+/** 前端解析必填指标输入：成功返回有限数值，失败返回中文错误信息（绝不让空值变成 0）。 */
+export function readRequiredMetric(label: string, raw: unknown): number {
+  const result = requiredMetricValue(label).safeParse(raw);
+  if (!result.success) throw new Error(result.error.issues[0]?.message ?? `${label}不合法`);
+  return result.data;
+}
+
+/** 前端解析可空指标输入：空值返回 null，非法内容抛错。 */
+export function readOptionalMetric(label: string, raw: unknown): number | null {
+  const result = optionalMetricValue(label).safeParse(raw);
+  if (!result.success) throw new Error(result.error.issues[0]?.message ?? `${label}不合法`);
+  return result.data ?? null;
+}
+
 export const emailSchema = z.string().trim().toLowerCase().email("邮箱格式不正确").max(254);
 export const passwordSchema = z
   .string()
@@ -144,8 +206,8 @@ export const goalCreateSchema = z.object({
   title: requiredText("目标标题", 160),
   category: z.enum(GOAL_CATEGORIES),
   metricType: z.enum(METRIC_TYPES),
-  baselineValue: z.coerce.number().finite().optional().nullable(),
-  targetValue: z.coerce.number().finite(),
+  baselineValue: optionalMetricValue("基线值"),
+  targetValue: requiredMetricValue("目标值"),
   unit: requiredText("单位", 24),
   dueDate: z.coerce.date(),
   method: optionalText(3000, "练习方法"),
@@ -165,7 +227,7 @@ export const goalListQuerySchema = z.object({
 });
 export const goalProgressCreateSchema = z.object({
   sessionId: z.string().uuid(),
-  actualValue: z.coerce.number().finite(),
+  actualValue: requiredMetricValue("实际进度值"),
   note: optionalText(1000, "进度备注"),
   evidenceMediaId: z.string().uuid().optional().nullable(),
   recordedAt: z.coerce.date().optional(),
@@ -173,7 +235,7 @@ export const goalProgressCreateSchema = z.object({
 export const goalCancelSchema = z.object({ reason: requiredText("取消原因", 1000) });
 export const goalActivateSchema = z.object({
   dueDate: z.coerce.date().optional(),
-  targetValue: z.coerce.number().finite().optional(),
+  targetValue: requiredMetricValue("目标值").optional(),
 });
 
 export const completionGoalProgressSchema = goalProgressCreateSchema.omit({ sessionId: true }).extend({
